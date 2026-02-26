@@ -1,4 +1,5 @@
 using System.Net;
+using Yarp.ReverseProxy;
 using Polly;
 using Polly.CircuitBreaker;
 using Polly.Timeout;
@@ -15,6 +16,7 @@ public class DynamicProxyService
     private readonly IServiceDiscovery _serviceDiscovery;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<DynamicProxyService> _logger;
+    private readonly DefaultProxyInvoker _proxyInvoker;
     
     // 断路器策略
     private readonly AsyncCircuitBreakerPolicy<HttpResponseMessage> _circuitBreakerPolicy;
@@ -23,11 +25,13 @@ public class DynamicProxyService
     public DynamicProxyService(
         IServiceDiscovery serviceDiscovery,
         IHttpClientFactory httpClientFactory,
-        ILogger<DynamicProxyService> logger)
+        ILogger<DynamicProxyService> logger,
+        DefaultProxyInvoker? proxyInvoker = null)
     {
         _serviceDiscovery = serviceDiscovery;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _proxyInvoker = proxyInvoker ?? new DefaultProxyInvoker(httpClientFactory);
 
         // 配置断路器：连续5次失败后断开30秒
         _circuitBreakerPolicy = Policy
@@ -51,6 +55,33 @@ public class DynamicProxyService
 
         // 配置超时：10秒
         _timeoutPolicy = Policy.TimeoutAsync(TimeSpan.FromSeconds(10));
+    }
+
+    /// <summary>
+    /// 使用YARP执行代理请求
+    /// </summary>
+    public async Task<HttpResponseMessage> ProxyRequestWithYarpAsync(
+        string clusterId,
+        string destinationId,
+        HttpRequestMessage request,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            // 使用YARP的代理调用器执行请求
+            var proxyResponse = await _proxyInvoker.InvokeAsync(
+                clusterId,
+                destinationId,
+                request,
+                cancellationToken);
+            
+            return proxyResponse;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "YARP代理请求失败: {ClusterId}/{DestinationId}", clusterId, destinationId);
+            throw;
+        }
     }
 
     /// <summary>

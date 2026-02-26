@@ -1,5 +1,7 @@
+using Yarp.ReverseProxy;
 using ServiceMesh.Core.Tracing;
 using ServiceMesh.Discovery;
+using ServiceMesh.Proxy.Configuration;
 using ServiceMesh.Proxy.Middleware;
 using ServiceMesh.Proxy.Services;
 
@@ -9,6 +11,14 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+
+// 添加动态代理配置提供程序
+builder.Services.AddSingleton<DynamicProxyConfigProvider>();
+builder.Services.AddSingleton<Yarp.ReverseProxy.Configuration.IProxyConfigProvider>(sp => sp.GetRequiredService<DynamicProxyConfigProvider>());
+
+// 添加YARP反向代理服务
+builder.Services.AddReverseProxy()
+    .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 
 // 添加 HttpClient（配置连接池）
 builder.Services.AddHttpClient("ProxyClient")
@@ -39,6 +49,12 @@ builder.Services.AddSingleton<ITraceCollector, InMemoryTraceCollector>();
 
 // 添加动态代理服务
 builder.Services.AddSingleton<DynamicProxyService>();
+
+// 添加YARP配置更新服务
+builder.Services.AddSingleton<IYarpConfigUpdater, YarpConfigUpdater>();
+
+// 添加YARP同步后台服务
+builder.Services.AddHostedService<YarpSyncBackgroundService>();
 
 var app = builder.Build();
 
