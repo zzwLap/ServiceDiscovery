@@ -60,40 +60,19 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
         }
 
         // 尝试注册服务（带重试）
-        for (int i = 0; i < _options.RegisterRetryCount; i++)
+        var registrationSuccess = await TryRegisterAsync(host, cancellationToken);
+
+        if (!registrationSuccess)
         {
-            try
-            {
-                _instanceId = await RegisterAsync(host, cancellationToken);
-                if (!string.IsNullOrEmpty(_instanceId))
-                {
-                    _isRegistered = true;
-                    break;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "服务注册失败，第{Retry}次重试", i + 1);
-                if (i < _options.RegisterRetryCount - 1)
-                {
-                    await Task.Delay(_options.RegisterRetryInterval, cancellationToken);
-                }
-            }
+            // 根据配置的策略处理注册失败
+            await HandleRegistrationFailureAsync(host, cancellationToken);
         }
-
-        if (!_isRegistered)
+        else
         {
-            throw new InvalidOperationException($"服务注册失败，已重试{_options.RegisterRetryCount}次");
+            // 启动心跳定时器
+            StartHeartbeatTimer();
+            _logger.LogInformation("服务注册客户端已启动，实例ID: {InstanceId}", _instanceId);
         }
-
-        // 启动心跳定时器
-        _heartbeatTimer = new Timer(
-            async _ => await SendHeartbeatAsync(),
-            null,
-            _options.HeartbeatInterval,
-            _options.HeartbeatInterval);
-
-        _logger.LogInformation("服务注册客户端已启动，实例ID: {InstanceId}", _instanceId);
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
@@ -114,6 +93,123 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
         }
 
         _logger.LogInformation("服务注册客户端已停止");
+    }
+
+    /// <summary>
+    /// 尝试注册服务（带重试）
+    /// </summary>
+    private async Task<bool> TryRegisterAsync(string host, CancellationToken cancellationToken)
+    {
+        // 如果设置为无限重试（0），则使用int.MaxValue作为上限
+        var maxRetries = _options.RegisterRetryCount == 0 ? int.MaxValue : _options.RegisterRetryCount;
+        
+        for (int i = 0; i < maxRetries; i++)
+        {
+            try
+            {
+                _instanceId = await RegisterAsync(host, cancellationToken);
+                if (!string.IsNullOrEmpty(_instanceId))
+                {
+                    _isRegistered = true;
+                    return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                var retryCount = i + 1;
+                if (_options.RegisterRetryCount == 0)
+                {
+                    _logger.LogWarning(ex, "服务注册失败，正在进行第{Retry}次重试（无限重试模式）", retryCount);
+                }
+                else
+                {
+                    _logger.LogError(ex, "服务注册失败，第{Retry}次重试", retryCount);
+                }
+                
+                // 检查是否还有重试机会
+                if (retryCount < maxRetries)
+                {
+                    await Task.Delay(_options.RegisterRetryInterval, cancellationToken);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 处理注册失败
+    /// </summary>
+    private async Task HandleRegistrationFailureAsync(string host, CancellationToken cancellationToken)
+    {
+        var policy = _options.FailurePolicy;
+
+        // 兼容旧版FailFastOnRegistrationError配置
+        if (_options.FailFastOnRegistrationError)
+        {
+            policy = RegistrationFailurePolicy.FailFast;
+        }
+
+        switch (policy)
+        {
+            case RegistrationFailurePolicy.FailFast:
+                _logger.LogError("服务注册失败，已重试{RetryCount}次，根据配置终止服务", 
+                    _options.RegisterRetryCount == 0 ? "无限" : _options.RegisterRetryCount.ToString());
+                throw new InvalidOperationException($"服务注册失败，已重试{_options.RegisterRetryCount}次");
+
+            case RegistrationFailurePolicy.ContinueWithoutRegistration:
+                _logger.LogWarning("服务注册失败，根据配置将继续运行但不再尝试注册");
+                _isRegistered = false;
+                break;
+
+            case RegistrationFailurePolicy.ContinueAndRetry:
+            default:
+                _logger.LogWarning("服务注册失败，服务将继续运行并在后台持续重试注册");
+                _ = Task.Run(async () => await BackgroundRegistrationRetryAsync(host, cancellationToken), cancellationToken);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 后台持续重试注册
+    /// </summary>
+    private async Task BackgroundRegistrationRetryAsync(string host, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("启动后台注册重试任务");
+        
+        while (!cancellationToken.IsCancellationRequested && !_isRegistered)
+        {
+            try
+            {
+                await Task.Delay(_options.RegisterRetryInterval, cancellationToken);
+                
+                _instanceId = await RegisterAsync(host, cancellationToken);
+                if (!string.IsNullOrEmpty(_instanceId))
+                {
+                    _isRegistered = true;
+                    StartHeartbeatTimer();
+                    _logger.LogInformation("后台重试注册成功，实例ID: {InstanceId}", _instanceId);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "后台注册重试失败，将在{RetryInterval}秒后再次尝试", 
+                    _options.RegisterRetryInterval.TotalSeconds);
+            }
+        }
+    }
+
+    /// <summary>
+    /// 启动心跳定时器
+    /// </summary>
+    private void StartHeartbeatTimer()
+    {
+        _heartbeatTimer = new Timer(
+            async _ => await SendHeartbeatAsync(),
+            null,
+            _options.HeartbeatInterval,
+            _options.HeartbeatInterval);
     }
 
     /// <summary>

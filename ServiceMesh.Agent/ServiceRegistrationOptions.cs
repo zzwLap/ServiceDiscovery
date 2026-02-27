@@ -56,7 +56,7 @@ public class ServiceRegistrationOptions
     public bool AutoRegister { get; set; } = true;
 
     /// <summary>
-    /// 注册重试次数
+    /// 注册重试次数（0表示无限重试直到成功）
     /// </summary>
     public int RegisterRetryCount { get; set; } = 3;
 
@@ -64,4 +64,35 @@ public class ServiceRegistrationOptions
     /// 注册重试间隔
     /// </summary>
     public TimeSpan RegisterRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// 注册失败时是否终止服务（FailFast模式）
+    /// </summary>
+    public bool FailFastOnRegistrationError { get; set; } = false;
+
+    /// <summary>
+    /// 注册失败后的处理策略
+    /// </summary>
+    public RegistrationFailurePolicy FailurePolicy { get; set; } = RegistrationFailurePolicy.ContinueAndRetry;
+}
+
+/// <summary>
+/// 服务注册失败处理策略
+/// </summary>
+public enum RegistrationFailurePolicy
+{
+    /// <summary>
+    /// 继续运行并在后台持续重试注册
+    /// </summary>
+    ContinueAndRetry,
+
+    /// <summary>
+    /// 继续运行但不再尝试注册（静默模式）
+    /// </summary>
+    ContinueWithoutRegistration,
+
+    /// <summary>
+    /// 终止服务（快速失败）
+    /// </summary>
+    FailFast
 }

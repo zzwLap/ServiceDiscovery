@@ -20,7 +20,7 @@ builder.Services.AddSingleton<Yarp.ReverseProxy.Configuration.IProxyConfigProvid
 builder.Services.AddReverseProxy()
     .LoadFromConfig(builder.Configuration.GetSection("ReverseProxy"));
 
-// 添加 HttpClient（配置连接池）
+// 添加 HttpClient（配置连接池和大文件传输优化）
 builder.Services.AddHttpClient("ProxyClient")
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
     {
@@ -33,9 +33,39 @@ builder.Services.AddHttpClient("ProxyClient")
         // TCP Keep-Alive
         KeepAlivePingDelay = TimeSpan.FromSeconds(60),
         KeepAlivePingTimeout = TimeSpan.FromSeconds(30),
-        KeepAlivePingPolicy = HttpKeepAlivePingPolicy.WithActiveRequests
+        KeepAlivePingPolicy = HttpKeepAlivePingPolicy.WithActiveRequests,
+        
+        // 大文件传输优化
+        MaxResponseHeadersLength = 1024 * 1024, // 1MB响应头限制
+        ResponseDrainTimeout = TimeSpan.FromSeconds(30), // 响应排空超时
+    })
+    .ConfigureHttpClient(client =>
+    {
+        // 大文件传输超时设置
+        client.Timeout = TimeSpan.FromMinutes(30); // 大文件上传/下载需要更长的超时
     })
     .SetHandlerLifetime(Timeout.InfiniteTimeSpan); // 不自动清理 Handler
+
+// 添加专门用于大文件传输的HTTP客户端
+builder.Services.AddHttpClient("FileTransferClient")
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        // 大文件传输专用配置
+        MaxConnectionsPerServer = 20, // 较少的连接数，但每个连接更稳定
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+        
+        // 启用TCP Keep-Alive
+        KeepAlivePingDelay = TimeSpan.FromSeconds(30),
+        KeepAlivePingTimeout = TimeSpan.FromSeconds(10),
+        
+        // 禁用代理自动检测以提高性能
+        UseProxy = false,
+    })
+    .ConfigureHttpClient(client =>
+    {
+        // 大文件传输需要很长的超时时间
+        client.Timeout = TimeSpan.FromHours(2);
+    });
 
 // 添加服务发现
 builder.Services.AddServiceDiscovery(options =>

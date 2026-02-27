@@ -46,7 +46,8 @@ public class GatewayController : ControllerBase
 
     private async Task<IActionResult> ProxyRequest(string serviceName, string? path, HttpMethod method)
     {
-        var targetPath = $"/api/{path ?? ""}";
+        // 使用 /svc 作为代理前缀，避免与服务端的 /api 前缀冲突
+        var targetPath = $"/svc/{serviceName}/{path ?? ""}";
         var requestUri = new Uri($"http://localhost{targetPath}");
 
         var request = new HttpRequestMessage(method, requestUri);

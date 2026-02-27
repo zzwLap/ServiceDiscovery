@@ -2,11 +2,10 @@
   "profiles": {
     "ServiceMesh.Registry": {
       "commandName": "Project",
-      "launchBrowser": true,
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       },
-      "applicationUrl": "https://localhost:55154;http://localhost:55155"
+      "applicationUrl": "http://localhost:5000"
     }
   }
 }

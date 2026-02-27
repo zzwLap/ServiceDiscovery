@@ -85,7 +85,7 @@ public class DynamicProxyService
     }
 
     /// <summary>
-    /// 转发请求到目标服务
+    /// 转发请求到目标服务 - 优化大文件传输
     /// </summary>
     public async Task<HttpResponseMessage> ProxyRequestAsync(
         string serviceName,
@@ -108,11 +108,39 @@ public class DynamicProxyService
         var targetUrl = BuildTargetUrl(instance, request);
         _logger.LogInformation("转发请求到: {TargetUrl}", targetUrl);
 
-        // 3. 创建转发请求
-        var forwardRequest = new HttpRequestMessage(request.Method, targetUrl)
+        // 3. 创建转发请求（保留原始请求的内容流）
+        var forwardRequest = new HttpRequestMessage(request.Method, targetUrl);
+        
+        // 如果存在请求内容，使用流式复制
+        if (request.Content != null)
         {
-            Content = request.Content
-        };
+            // 检查是否为流式内容
+            if (request.Content is StreamContent originalStreamContent)
+            {
+                // 重新创建StreamContent以支持重新读取
+                var stream = await originalStreamContent.ReadAsStreamAsync();
+                if (stream.CanSeek)
+                {
+                    stream.Position = 0;
+                }
+                
+                // 使用64KB缓冲区创建新的StreamContent
+                var newStreamContent = new StreamContent(stream, 64 * 1024);
+                
+                // 复制内容头部
+                foreach (var header in request.Content.Headers)
+                {
+                    newStreamContent.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                }
+                
+                forwardRequest.Content = newStreamContent;
+            }
+            else
+            {
+                // 对于非流式内容，直接复制
+                forwardRequest.Content = request.Content;
+            }
+        }
 
         // 复制请求头
         foreach (var header in request.Headers)
@@ -120,9 +148,11 @@ public class DynamicProxyService
             forwardRequest.Headers.TryAddWithoutValidation(header.Key, header.Value);
         }
 
-        // 4. 执行请求（带断路器和超时）
-        // 使用命名客户端获取连接池中的连接
-        var client = _httpClientFactory.CreateClient("ProxyClient");
+        // 4. 执行请求（带断路器和超时）- 使用ResponseHeadersRead实现流式响应
+        // 根据内容大小选择合适的客户端
+        var isLargeFile = request.Content?.Headers.ContentLength > 10 * 1024 * 1024;
+        var clientName = isLargeFile ? "FileTransferClient" : "ProxyClient";
+        var client = _httpClientFactory.CreateClient(clientName);
         
         try
         {
@@ -130,7 +160,11 @@ public class DynamicProxyService
                 .WrapAsync(_timeoutPolicy)
                 .ExecuteAsync(async ct =>
                 {
-                    var result = await client.SendAsync(forwardRequest, ct);
+                    // 使用ResponseHeadersRead模式，立即返回响应头，不等待整个内容加载
+                    var result = await client.SendAsync(
+                        forwardRequest, 
+                        HttpCompletionOption.ResponseHeadersRead, 
+                        ct);
                     return result;
                 }, cancellationToken);
 
@@ -169,11 +203,22 @@ public class DynamicProxyService
     {
         var path = request.RequestUri?.PathAndQuery ?? "/";
         
-        // 移除服务名前缀（如 /api/userservice/xxx -> /xxx）
+        // 统一处理路径：移除 /svc/{serviceName} 前缀
+        // 使用 /svc 作为代理前缀，避免与服务端的 /api 前缀冲突
+        // 支持格式: /svc/serviceName/xxx 或 /svc/ServiceName/xxx
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length > 1)
+        
+        if (segments.Length >= 2 && 
+            segments[0].Equals("svc", StringComparison.OrdinalIgnoreCase))
         {
-            path = "/" + string.Join("/", segments.Skip(1));
+            // 跳过 /svc/{serviceName}，保留后面的路径
+            var remainingSegments = segments.Skip(2);
+            path = "/" + string.Join("/", remainingSegments);
+        }
+        
+        if (string.IsNullOrEmpty(path) || path == "/")
+        {
+            path = "/";
         }
 
         return $"http://{instance.GetAddress()}{path}";

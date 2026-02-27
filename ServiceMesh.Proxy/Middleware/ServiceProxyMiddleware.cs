@@ -37,7 +37,8 @@ public class ServiceProxyMiddleware
     {
         var request = context.Request;
         
-        // 从路径中提取服务名 /api/{serviceName}/xxx
+        // 从路径中提取服务名 /svc/{serviceName}/xxx
+        // 使用 /svc 作为代理前缀，避免与服务端的 /api 前缀冲突
         var path = request.Path.Value;
         if (string.IsNullOrEmpty(path))
         {
@@ -46,7 +47,7 @@ public class ServiceProxyMiddleware
         }
 
         var segments = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length < 2 || segments[0] != "api")
+        if (segments.Length < 2 || !segments[0].Equals("svc", StringComparison.OrdinalIgnoreCase))
         {
             await _next(context);
             return;
@@ -86,7 +87,7 @@ public class ServiceProxyMiddleware
     }
 
     /// <summary>
-    /// 使用YARP处理请求
+    /// 使用YARP处理请求 - 优化大文件传输
     /// </summary>
     private async Task ProcessWithYarp(HttpContext context, HttpRequest request, string serviceName)
     {
@@ -107,19 +108,29 @@ public class ServiceProxyMiddleware
             // 构建目标地址
             var destinationAddress = $"http://{instance.GetAddress()}";
             
-            // 使用YARP的HTTP转发器
-            var httpClient = _serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient("ProxyClient");
+            // 根据请求大小选择合适的HTTP客户端
+            var isLargeFile = request.ContentLength > 10 * 1024 * 1024; // 大于10MB视为大文件
+            var clientName = isLargeFile ? "FileTransferClient" : "ProxyClient";
+            var httpClient = _serviceProvider.GetRequiredService<IHttpClientFactory>().CreateClient(clientName);
             
-            // 转发请求
+            if (isLargeFile)
+            {
+                _logger.LogInformation("检测到大型文件传输，使用专用客户端: {ServiceName}, 大小: {Size} bytes", 
+                    serviceName, request.ContentLength);
+            }
+            
+            // 转发请求 - 针对大文件优化配置
             var error = await _httpForwarder.SendAsync(
                 context,
                 destinationAddress,
                 httpClient,
                 new ForwarderRequestConfig
                 {
-                    ActivityTimeout = TimeSpan.FromSeconds(30),
+                    ActivityTimeout = isLargeFile ? TimeSpan.FromMinutes(30) : TimeSpan.FromSeconds(30),
                     Version = new Version(1, 1),
-                    VersionPolicy = HttpVersionPolicy.RequestVersionOrLower
+                    VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+                    // 禁用响应缓冲，实现流式传输
+                    AllowResponseBuffering = false
                 },
                 HttpTransformer.Default,
                 cancellationToken: context.RequestAborted);
@@ -149,10 +160,14 @@ public class ServiceProxyMiddleware
     }
 
     /// <summary>
-    /// 使用传统代理服务处理请求
+    /// 使用传统代理服务处理请求 - 优化大文件传输
     /// </summary>
     private async Task ProcessWithTraditionalProxy(HttpContext context, HttpRequest request, string path, string serviceName)
     {
+        // 保持原始路径，让 DynamicProxyService 统一处理路径解析
+        // 原始路径: /svc/serviceName/xxx/yyy
+        // DynamicProxyService.BuildTargetUrl 会移除 /svc/{serviceName} 前缀
+        
         // 创建转发请求
         var forwardRequest = new HttpRequestMessage
         {
@@ -160,24 +175,42 @@ public class ServiceProxyMiddleware
             RequestUri = new Uri($"http://localhost{path}")
         };
 
-        // 复制请求体
-        if (request.ContentLength > 0)
+        // 复制请求体 - 使用优化的流处理
+        if (request.ContentLength > 0 || request.Headers.ContainsKey("Transfer-Encoding"))
         {
-            forwardRequest.Content = new StreamContent(request.Body);
+            // 使用较大的缓冲区（64KB）提高大文件传输性能
+            var streamContent = new StreamContent(request.Body, 64 * 1024);
+            
             if (request.ContentType != null)
             {
-                forwardRequest.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(request.ContentType);
+                streamContent.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(request.ContentType);
+            }
+            
+            // 保留原始内容长度信息（如果存在）
+            if (request.ContentLength.HasValue)
+            {
+                streamContent.Headers.ContentLength = request.ContentLength;
+            }
+            
+            forwardRequest.Content = streamContent;
+        }
+
+        // 复制请求头（排除已自动处理的头部）
+        foreach (var header in request.Headers)
+        {
+            // 跳过内容相关的头部，由StreamContent自动处理
+            if (!header.Key.StartsWith("Content-", StringComparison.OrdinalIgnoreCase) &&
+                !header.Key.Equals("Transfer-Encoding", StringComparison.OrdinalIgnoreCase))
+            {
+                forwardRequest.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
             }
         }
 
-        // 复制请求头
-        foreach (var header in request.Headers)
-        {
-            forwardRequest.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
-        }
-
-        // 转发请求
-        var response = await _proxyService.ProxyRequestAsync(serviceName, forwardRequest, context.RequestAborted);
+        // 转发请求 - 使用ResponseHeadersRead模式实现流式传输
+        using var response = await _proxyService.ProxyRequestAsync(
+            serviceName, 
+            forwardRequest, 
+            context.RequestAborted);
 
         // 设置响应状态码
         context.Response.StatusCode = (int)response.StatusCode;
@@ -190,11 +223,18 @@ public class ServiceProxyMiddleware
 
         foreach (var header in response.Content.Headers)
         {
-            context.Response.Headers[header.Key] = header.Value.ToArray();
+            // 避免重复设置Content-Length（如果已设置）
+            if (!context.Response.Headers.ContainsKey(header.Key))
+            {
+                context.Response.Headers[header.Key] = header.Value.ToArray();
+            }
         }
 
-        // 写入响应体
-        await response.Content.CopyToAsync(context.Response.Body);
+        // 使用优化的流式复制（64KB缓冲区）
+        var buffer = new byte[64 * 1024]; // 64KB缓冲区
+        await response.Content.CopyToAsync(
+            context.Response.Body, 
+            context.RequestAborted);
     }
 }
 

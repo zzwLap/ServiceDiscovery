@@ -3,6 +3,8 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace ServiceMesh.Agent;
 
@@ -52,25 +54,65 @@ public static class ServiceRegistrationExtensions
     /// </summary>
     public static IApplicationBuilder UseServiceRegistration(this IApplicationBuilder app)
     {
-        // 获取服务器地址并更新配置
         var server = app.ApplicationServices.GetService<IServer>();
-        var options = app.ApplicationServices.GetService<Microsoft.Extensions.Options.IOptions<ServiceRegistrationOptions>>()?.Value;
+        var optionsMonitor = app.ApplicationServices.GetService<IOptionsMonitor<ServiceRegistrationOptions>>();
 
-        if (server != null && options != null && options.Port == 0)
+        if (server == null || optionsMonitor == null)
         {
-            var addresses = server.Features.Get<IServerAddressesFeature>()?.Addresses;
-            if (addresses != null && addresses.Any())
+            return app;
+        }
+
+        var options = optionsMonitor.CurrentValue;
+        
+        // 如果端口已配置，不需要自动获取
+        if (options.Port != 0)
+        {
+            return app;
+        }
+
+        // 注册一个启动完成后的回调来获取服务器地址
+        var lifetime = app.ApplicationServices.GetService<IHostApplicationLifetime>();
+        if (lifetime != null)
+        {
+            lifetime.ApplicationStarted.Register(() =>
             {
-                var address = addresses.First();
-                var uri = new Uri(address);
-                
-                // 通过配置更新端口
-                var config = app.ApplicationServices.GetService<Microsoft.Extensions.Configuration.IConfiguration>();
-                if (config is Microsoft.Extensions.Configuration.IConfigurationRoot configRoot)
+                try
                 {
-                    // 这里可以通过其他方式传递端口信息
+                    var addressesFeature = server.Features.Get<IServerAddressesFeature>();
+                    var addresses = addressesFeature?.Addresses;
+                    
+                    if (addresses != null && addresses.Any())
+                    {
+                        var address = addresses.First();
+                        var uri = new Uri(address);
+                        
+                        // 更新配置值
+                        options.Port = uri.Port;
+                        
+                        if (string.IsNullOrEmpty(options.Host))
+                        {
+                            options.Host = uri.Host;
+                        }
+                        
+                        // 记录日志
+                        var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
+                            .CreateLogger("ServiceRegistration");
+                        logger?.LogInformation("自动获取服务地址成功: {Host}:{Port}", options.Host, options.Port);
+                    }
+                    else
+                    {
+                        var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
+                            .CreateLogger("ServiceRegistration");
+                        logger?.LogWarning("无法获取服务器地址，请手动配置端口");
+                    }
                 }
-            }
+                catch (Exception ex)
+                {
+                    var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
+                        .CreateLogger("ServiceRegistration");
+                    logger?.LogError(ex, "自动获取服务器地址时发生错误");
+                }
+            });
         }
 
         return app;
