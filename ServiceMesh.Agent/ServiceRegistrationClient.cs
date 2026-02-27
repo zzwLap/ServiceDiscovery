@@ -106,6 +106,13 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
                 return;
             }
 
+            // 将获取到的Host同步回配置（如果之前未设置）
+            if (string.IsNullOrEmpty(_options.Host))
+            {
+                _options.Host = host;
+                _logger.LogInformation("从服务信息提供者获取主机地址: {Host}", _options.Host);
+            }
+
             // 尝试注册服务（带重试）
             var registrationSuccess = await TryRegisterAsync(host, cancellationToken);
 
@@ -194,15 +201,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
     /// </summary>
     private async Task HandleRegistrationFailureAsync(string host, CancellationToken cancellationToken)
     {
-        var policy = _options.FailurePolicy;
-
-        // 兼容旧版FailFastOnRegistrationError配置
-        if (_options.FailFastOnRegistrationError)
-        {
-            policy = RegistrationFailurePolicy.FailFast;
-        }
-
-        switch (policy)
+        switch (_options.FailurePolicy)
         {
             case RegistrationFailurePolicy.FailFast:
                 _logger.LogError("服务注册失败，已重试{RetryCount}次，根据配置终止服务",

@@ -9,6 +9,21 @@ using Microsoft.Extensions.Options;
 namespace ServiceMesh.Agent;
 
 /// <summary>
+/// 健康检查中间件扩展
+/// </summary>
+public static class HealthCheckExtensions
+{
+    /// <summary>
+    /// 使用默认健康检查中间件
+    /// 配置从 ServiceRegistrationOptions 统一获取
+    /// </summary>
+    public static IApplicationBuilder UseDefaultHealthCheck(this IApplicationBuilder app)
+    {
+        return app.UseMiddleware<DefaultHealthCheckMiddleware>();
+    }
+}
+
+/// <summary>
 /// 服务注册扩展方法
 /// </summary>
 public static class ServiceRegistrationExtensions
@@ -77,7 +92,25 @@ public static class ServiceRegistrationExtensions
     }
 
     /// <summary>
-    /// 使用服务注册（自动获取端口）
+    /// 添加服务自动注册并配置元数据
+    /// </summary>
+    public static IServiceCollection AddServiceRegistration(
+        this IServiceCollection services,
+        Action<ServiceRegistrationOptions> configureOptions,
+        Dictionary<string, string> metadata)
+    {
+        return services.AddServiceRegistration(options =>
+        {
+            configureOptions(options);
+            foreach (var item in metadata)
+            {
+                options.Metadata[item.Key] = item.Value;
+            }
+        });
+    }
+
+    /// <summary>
+    /// 使用服务注册（自动获取端口，可选启用默认健康检查）
     /// </summary>
     public static IApplicationBuilder UseServiceRegistration(this IApplicationBuilder app)
     {
@@ -90,7 +123,13 @@ public static class ServiceRegistrationExtensions
         }
 
         var options = optionsMonitor.CurrentValue;
-        
+
+        // 如果启用默认健康检查，注册中间件
+        if (options.EnableDefaultHealthCheck)
+        {
+            app.UseDefaultHealthCheck();
+        }
+
         // 如果端口已配置，不需要自动获取
         if (options.Port != 0)
         {
@@ -107,20 +146,20 @@ public static class ServiceRegistrationExtensions
                 {
                     var addressesFeature = server.Features.Get<IServerAddressesFeature>();
                     var addresses = addressesFeature?.Addresses;
-                    
+
                     if (addresses != null && addresses.Any())
                     {
                         var address = addresses.First();
                         var uri = new Uri(address);
-                        
+
                         // 更新配置值
                         options.Port = uri.Port;
-                        
+
                         if (string.IsNullOrEmpty(options.Host))
                         {
                             options.Host = uri.Host;
                         }
-                        
+
                         // 记录日志
                         var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
                             .CreateLogger("ServiceRegistration");

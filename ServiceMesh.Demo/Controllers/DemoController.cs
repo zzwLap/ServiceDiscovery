@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using ServiceMesh.Core.Interfaces;
+using ServiceMesh.Core.Models;
+using System.Text.Json;
 
 namespace ServiceMesh.Demo.Controllers;
 
@@ -12,13 +14,21 @@ public class DemoController : ControllerBase
 {
     private readonly ILogger<DemoController> _logger;
     private readonly IServiceDiscovery _serviceDiscovery;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly IConfiguration _config;
     private readonly string _serviceName;
     private readonly string _instanceId;
 
-    public DemoController(ILogger<DemoController> logger, IServiceDiscovery serviceDiscovery, IConfiguration config)
+    public DemoController(
+        ILogger<DemoController> logger,
+        IServiceDiscovery serviceDiscovery,
+        IHttpClientFactory httpClientFactory,
+        IConfiguration config)
     {
         _logger = logger;
         _serviceDiscovery = serviceDiscovery;
+        _httpClientFactory = httpClientFactory;
+        _config = config;
         _serviceName = config.GetValue<string>("ServiceName") ?? "DemoService";
         _instanceId = Guid.NewGuid().ToString("N")[..8];
     }
@@ -110,12 +120,116 @@ public class DemoController : ControllerBase
     public IActionResult SimulateError()
     {
         _logger.LogError("模拟错误发生");
-        
+
         return StatusCode(500, new
         {
             error = "模拟服务器错误",
             instanceId = _instanceId,
             timestamp = DateTime.UtcNow
         });
+    }
+
+    /// <summary>
+    /// 获取所有注册的服务名称列表
+    /// </summary>
+    [HttpGet("services")]
+    public async Task<IActionResult> GetAllServices()
+    {
+        var registryUrl = _config.GetValue<string>("ServiceRegistry:Url") ?? "http://localhost:5000";
+        var client = _httpClientFactory.CreateClient();
+
+        try
+        {
+            var response = await client.GetAsync($"{registryUrl}/api/registry/services");
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync();
+            var services = JsonSerializer.Deserialize<List<string>>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            return Ok(new
+            {
+                totalServices = services?.Count ?? 0,
+                services = services ?? new List<string>(),
+                instanceId = _instanceId,
+                timestamp = DateTime.UtcNow
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "获取所有服务列表失败");
+            return StatusCode(500, new
+            {
+                error = "获取服务列表失败",
+                message = ex.Message,
+                instanceId = _instanceId
+            });
+        }
+    }
+
+    /// <summary>
+    /// 获取所有服务实例详情
+    /// </summary>
+    [HttpGet("instances")]
+    public async Task<IActionResult> GetAllInstances()
+    {
+        var registryUrl = _config.GetValue<string>("ServiceRegistry:Url") ?? "http://localhost:5000";
+        var client = _httpClientFactory.CreateClient();
+
+        try
+        {
+            var response = await client.GetAsync($"{registryUrl}/api/registry/instances");
+            response.EnsureSuccessStatusCode();
+
+            var json = await response.Content.ReadAsStringAsync();
+            var instances = JsonSerializer.Deserialize<List<ServiceInstance>>(json, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+
+            // 按服务名称分组统计
+            var serviceGroups = instances?
+                .GroupBy(i => i.ServiceName)
+                .Select(g => new
+                {
+                    serviceName = g.Key,
+                    instanceCount = g.Count(),
+                    healthyCount = g.Count(i => i.Status == ServiceStatus.Healthy),
+                    unhealthyCount = g.Count(i => i.Status == ServiceStatus.Unhealthy)
+                })
+                .Cast<object>()
+                .ToList();
+
+            return Ok(new
+            {
+                totalInstances = instances?.Count ?? 0,
+                serviceGroups = serviceGroups ?? new List<object>(),
+                instances = instances?.Select(i => new
+                {
+                    i.Id,
+                    i.ServiceName,
+                    i.Host,
+                    i.Port,
+                    i.Version,
+                    i.Status,
+                    i.Weight,
+                    i.LastHeartbeat
+                }),
+                instanceId = _instanceId,
+                timestamp = DateTime.UtcNow
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "获取所有服务实例失败");
+            return StatusCode(500, new
+            {
+                error = "获取服务实例失败",
+                message = ex.Message,
+                instanceId = _instanceId
+            });
+        }
     }
 }

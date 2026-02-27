@@ -1,4 +1,4 @@
-﻿@ServiceMesh.Demo_HostAddress = http://localhost:5001
+﻿@ServiceMesh.Demo_HostAddress = https://localhost:55156
 
 @a=0
 @b=0
@@ -6,7 +6,7 @@ GET {{ServiceMesh.Demo_HostAddress}}/api/demo/calculate?a={{a}}&b={{b}}
 
 ###
 
-@serviceName=string
+@serviceName="LisView"
 GET {{ServiceMesh.Demo_HostAddress}}/api/demo/discover/{{serviceName}}
 
 ###
@@ -23,4 +23,14 @@ GET {{ServiceMesh.Demo_HostAddress}}/api/demo/slow
 
 ###
 
-GET http://localhost:55159/gateway/DemoService/demo/info
+GET {{ServiceMesh.Demo_HostAddress}}/api/demo/info
+
+###
+
+GET {{ServiceMesh.Demo_HostAddress}}/api/demo/services
+
+###
+
+GET {{ServiceMesh.Demo_HostAddress}}/api/demo/instances
+
+###

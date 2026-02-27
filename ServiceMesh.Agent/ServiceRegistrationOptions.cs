@@ -6,11 +6,6 @@ namespace ServiceMesh.Agent;
 public class ServiceRegistrationOptions
 {
     /// <summary>
-    /// 服务信息提供者 - 用于动态获取服务名称、端口等信息
-    /// 如果未设置，将使用默认的 DefaultServiceInfoProvider
-    /// </summary>
-    public IServiceInfoProvider? ServiceInfoProvider { get; set; }
-    /// <summary>
     /// 注册中心地址
     /// </summary>
     public string RegistryUrl { get; set; } = "http://localhost:5000";
@@ -71,14 +66,20 @@ public class ServiceRegistrationOptions
     public TimeSpan RegisterRetryInterval { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>
-    /// 注册失败时是否终止服务（FailFast模式）
-    /// </summary>
-    public bool FailFastOnRegistrationError { get; set; } = false;
-
-    /// <summary>
     /// 注册失败后的处理策略
     /// </summary>
     public RegistrationFailurePolicy FailurePolicy { get; set; } = RegistrationFailurePolicy.ContinueAndRetry;
+
+    /// <summary>
+    /// 是否启用默认健康检查中间件
+    /// 启用后会自动响应 /health 路径的健康检查请求
+    /// </summary>
+    public bool EnableDefaultHealthCheck { get; set; } = false;
+
+    /// <summary>
+    /// 健康检查路径，默认为 /health
+    /// </summary>
+    public string HealthCheckPath { get; set; } = "/health";
 }
 
 /// <summary>

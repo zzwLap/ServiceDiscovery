@@ -8,7 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
-
+builder.Services.AddHttpClient();
 // 从配置读取服务信息
 var serviceName = builder.Configuration.GetValue<string>("ServiceName") ?? "DemoService";
 var servicePort = builder.Configuration.GetValue<int>("Port");
