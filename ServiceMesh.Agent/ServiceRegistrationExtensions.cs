@@ -29,6 +29,33 @@ public static class ServiceRegistrationExtensions
             services.Configure<ServiceRegistrationOptions>(_ => { });
         }
 
+        // 注册默认的服务信息提供者（如果用户未注册自定义实现）
+        services.AddSingleton<IServiceInfoProvider, DefaultServiceInfoProvider>();
+        services.AddHostedService<ServiceRegistrationClient>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// 添加服务自动注册（带自定义服务信息提供者）
+    /// </summary>
+    /// <typeparam name="TProvider">自定义服务信息提供者类型</typeparam>
+    public static IServiceCollection AddServiceRegistration<TProvider>(
+        this IServiceCollection services,
+        Action<ServiceRegistrationOptions>? configureOptions = null)
+        where TProvider : class, IServiceInfoProvider
+    {
+        if (configureOptions != null)
+        {
+            services.Configure(configureOptions);
+        }
+        else
+        {
+            services.Configure<ServiceRegistrationOptions>(_ => { });
+        }
+
+        // 注册自定义服务信息提供者
+        services.AddSingleton<IServiceInfoProvider, TProvider>();
         services.AddHostedService<ServiceRegistrationClient>();
 
         return services;

@@ -12,10 +12,6 @@ builder.Services.AddSwaggerGen();
 // 从配置读取服务信息
 var serviceName = builder.Configuration.GetValue<string>("ServiceName") ?? "DemoService";
 var servicePort = builder.Configuration.GetValue<int>("Port");
-if (servicePort == 0)
-{
-    servicePort = 5001; // 默认端口
-}
 
 // 添加服务自动注册
 builder.Services.AddServiceRegistration(options =>

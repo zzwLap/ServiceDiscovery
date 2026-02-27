@@ -18,60 +18,112 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
     private readonly ServiceRegistrationOptions _options;
     private readonly ILogger<ServiceRegistrationClient> _logger;
     private readonly HttpClient _httpClient;
+    private readonly IServiceInfoProvider _serviceInfoProvider;
+    private readonly IHostApplicationLifetime _lifetime;
     private Timer? _heartbeatTimer;
     private string? _instanceId;
     private bool _isRegistered = false;
 
     public ServiceRegistrationClient(
         IOptions<ServiceRegistrationOptions> options,
-        ILogger<ServiceRegistrationClient> logger)
+        ILogger<ServiceRegistrationClient> logger,
+        IServiceInfoProvider serviceInfoProvider,
+        IHostApplicationLifetime lifetime)
     {
         _options = options.Value;
         _logger = logger;
+        _serviceInfoProvider = serviceInfoProvider;
+        _lifetime = lifetime;
         _httpClient = new HttpClient
         {
             Timeout = TimeSpan.FromSeconds(10)
         };
     }
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public Task StartAsync(CancellationToken cancellationToken)
     {
         if (!_options.AutoRegister)
         {
             _logger.LogInformation("自动注册已禁用");
-            return;
+            return Task.CompletedTask;
         }
 
-        if (string.IsNullOrEmpty(_options.ServiceName))
+        // 延迟到应用程序启动完成后再执行注册
+        _lifetime.ApplicationStarted.Register(() =>
         {
-            throw new InvalidOperationException("服务名称不能为空");
-        }
+            _ = RegisterServiceAsync(_lifetime.ApplicationStopping);
+        });
 
-        if (_options.Port <= 0)
-        {
-            throw new InvalidOperationException("服务端口号必须大于0");
-        }
+        return Task.CompletedTask;
+    }
 
-        // 自动获取主机地址
-        var host = _options.Host ?? GetLocalIpAddress();
-        if (string.IsNullOrEmpty(host))
+    /// <summary>
+    /// 执行服务注册
+    /// </summary>
+    private async Task RegisterServiceAsync(CancellationToken cancellationToken)
+    {
+        try
         {
-            throw new InvalidOperationException("无法获取本地IP地址，请手动配置");
-        }
+            // 如果服务名称为空，尝试从提供者获取
+            if (string.IsNullOrEmpty(_options.ServiceName))
+            {
+                var serviceNameFromProvider = _serviceInfoProvider.GetServiceName();
+                if (!string.IsNullOrEmpty(serviceNameFromProvider))
+                {
+                    _options.ServiceName = serviceNameFromProvider;
+                    _logger.LogInformation("从服务信息提供者获取服务名称: {ServiceName}", _options.ServiceName);
+                }
+            }
 
-        // 尝试注册服务（带重试）
-        var registrationSuccess = await TryRegisterAsync(host, cancellationToken);
+            // 如果端口未设置，尝试从提供者获取
+            if (_options.Port <= 0)
+            {
+                var portFromProvider = _serviceInfoProvider.GetPort();
+                if (portFromProvider > 0)
+                {
+                    _options.Port = portFromProvider;
+                    _logger.LogInformation("从服务信息提供者获取端口号: {Port}", _options.Port);
+                }
+            }
 
-        if (!registrationSuccess)
-        {
-            // 根据配置的策略处理注册失败
-            await HandleRegistrationFailureAsync(host, cancellationToken);
+            if (string.IsNullOrEmpty(_options.ServiceName))
+            {
+                _logger.LogError("服务名称不能为空，请配置服务名称或实现 IServiceInfoProvider 接口");
+                return;
+            }
+
+            if (_options.Port <= 0)
+            {
+                _logger.LogError("服务端口号必须大于0，请配置端口号或实现 IServiceInfoProvider 接口");
+                return;
+            }
+
+            // 自动获取主机地址
+            var host = _options.Host ?? _serviceInfoProvider.GetHost() ?? GetLocalIpAddress();
+            if (string.IsNullOrEmpty(host))
+            {
+                _logger.LogError("无法获取本地IP地址，请手动配置");
+                return;
+            }
+
+            // 尝试注册服务（带重试）
+            var registrationSuccess = await TryRegisterAsync(host, cancellationToken);
+
+            if (!registrationSuccess)
+            {
+                // 根据配置的策略处理注册失败
+                await HandleRegistrationFailureAsync(host, cancellationToken);
+            }
+            else
+            {
+                // 启动心跳定时器
+                StartHeartbeatTimer();
+                _logger.LogInformation("服务注册客户端已启动，实例ID: {InstanceId}", _instanceId);
+            }
         }
-        else
+        catch (Exception ex)
         {
-            // 启动心跳定时器
-            StartHeartbeatTimer();
-            _logger.LogInformation("服务注册客户端已启动，实例ID: {InstanceId}", _instanceId);
+            _logger.LogError(ex, "服务注册过程中发生异常");
         }
     }
 
@@ -102,7 +154,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
     {
         // 如果设置为无限重试（0），则使用int.MaxValue作为上限
         var maxRetries = _options.RegisterRetryCount == 0 ? int.MaxValue : _options.RegisterRetryCount;
-        
+
         for (int i = 0; i < maxRetries; i++)
         {
             try
@@ -125,7 +177,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
                 {
                     _logger.LogError(ex, "服务注册失败，第{Retry}次重试", retryCount);
                 }
-                
+
                 // 检查是否还有重试机会
                 if (retryCount < maxRetries)
                 {
@@ -153,7 +205,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
         switch (policy)
         {
             case RegistrationFailurePolicy.FailFast:
-                _logger.LogError("服务注册失败，已重试{RetryCount}次，根据配置终止服务", 
+                _logger.LogError("服务注册失败，已重试{RetryCount}次，根据配置终止服务",
                     _options.RegisterRetryCount == 0 ? "无限" : _options.RegisterRetryCount.ToString());
                 throw new InvalidOperationException($"服务注册失败，已重试{_options.RegisterRetryCount}次");
 
@@ -176,13 +228,13 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
     private async Task BackgroundRegistrationRetryAsync(string host, CancellationToken cancellationToken)
     {
         _logger.LogInformation("启动后台注册重试任务");
-        
+
         while (!cancellationToken.IsCancellationRequested && !_isRegistered)
         {
             try
             {
                 await Task.Delay(_options.RegisterRetryInterval, cancellationToken);
-                
+
                 _instanceId = await RegisterAsync(host, cancellationToken);
                 if (!string.IsNullOrEmpty(_instanceId))
                 {
@@ -194,7 +246,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "后台注册重试失败，将在{RetryInterval}秒后再次尝试", 
+                _logger.LogWarning(ex, "后台注册重试失败，将在{RetryInterval}秒后再次尝试",
                     _options.RegisterRetryInterval.TotalSeconds);
             }
         }
@@ -244,7 +296,7 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
 
             if (result?.Success == true)
             {
-                _logger.LogInformation("服务注册成功: {ServiceName} - {InstanceId}", 
+                _logger.LogInformation("服务注册成功: {ServiceName} - {InstanceId}",
                     _options.ServiceName, result.InstanceId);
                 return result.InstanceId;
             }
@@ -324,12 +376,12 @@ public class ServiceRegistrationClient : IHostedService, IDisposable
             // 备选：通过网络接口获取
             foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
             {
-                if (ni.OperationalStatus == OperationalStatus.Up && 
+                if (ni.OperationalStatus == OperationalStatus.Up &&
                     ni.NetworkInterfaceType != NetworkInterfaceType.Loopback)
                 {
                     var props = ni.GetIPProperties();
                     var address = props.UnicastAddresses
-                        .FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork && 
+                        .FirstOrDefault(a => a.Address.AddressFamily == AddressFamily.InterNetwork &&
                                              !IPAddress.IsLoopback(a.Address));
                     if (address != null)
                     {

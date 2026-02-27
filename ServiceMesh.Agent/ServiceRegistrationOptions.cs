@@ -6,6 +6,11 @@ namespace ServiceMesh.Agent;
 public class ServiceRegistrationOptions
 {
     /// <summary>
+    /// 服务信息提供者 - 用于动态获取服务名称、端口等信息
+    /// 如果未设置，将使用默认的 DefaultServiceInfoProvider
+    /// </summary>
+    public IServiceInfoProvider? ServiceInfoProvider { get; set; }
+    /// <summary>
     /// 注册中心地址
     /// </summary>
     public string RegistryUrl { get; set; } = "http://localhost:5000";
