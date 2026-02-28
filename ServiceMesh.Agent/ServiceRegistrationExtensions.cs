@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.Extensions.DependencyInjection;
@@ -20,6 +21,35 @@ public static class HealthCheckExtensions
     public static IApplicationBuilder UseDefaultHealthCheck(this IApplicationBuilder app)
     {
         return app.UseMiddleware<DefaultHealthCheckMiddleware>();
+    }
+}
+
+/// <summary>
+/// 自动健康检查启动过滤器
+/// 当 EnableDefaultHealthCheck 为 true 时自动注册健康检查中间件
+/// </summary>
+internal class AutoHealthCheckStartupFilter : IStartupFilter
+{
+    private readonly IOptionsMonitor<ServiceRegistrationOptions> _optionsMonitor;
+
+    public AutoHealthCheckStartupFilter(IOptionsMonitor<ServiceRegistrationOptions> optionsMonitor)
+    {
+        _optionsMonitor = optionsMonitor;
+    }
+
+    public Action<IApplicationBuilder> Configure(Action<IApplicationBuilder> next)
+    {
+        return builder =>
+        {
+            // 如果启用默认健康检查，在管道最开始注册中间件
+            // 这样可以确保健康检查端点优先响应，不受其他中间件影响
+            if (_optionsMonitor.CurrentValue.EnableDefaultHealthCheck)
+            {
+                builder.UseDefaultHealthCheck();
+            }
+            
+            next(builder);
+        };
     }
 }
 
@@ -47,6 +77,10 @@ public static class ServiceRegistrationExtensions
         // 注册默认的服务信息提供者（如果用户未注册自定义实现）
         services.AddSingleton<IServiceInfoProvider, DefaultServiceInfoProvider>();
         services.AddHostedService<ServiceRegistrationClient>();
+        
+        // 注册自动健康检查启动过滤器
+        // 当 EnableDefaultHealthCheck 为 true 时自动配置健康检查中间件
+        services.AddSingleton<IStartupFilter, AutoHealthCheckStartupFilter>();
 
         return services;
     }
@@ -109,78 +143,4 @@ public static class ServiceRegistrationExtensions
         });
     }
 
-    /// <summary>
-    /// 使用服务注册（自动获取端口，可选启用默认健康检查）
-    /// </summary>
-    public static IApplicationBuilder UseServiceRegistration(this IApplicationBuilder app)
-    {
-        var server = app.ApplicationServices.GetService<IServer>();
-        var optionsMonitor = app.ApplicationServices.GetService<IOptionsMonitor<ServiceRegistrationOptions>>();
-
-        if (server == null || optionsMonitor == null)
-        {
-            return app;
-        }
-
-        var options = optionsMonitor.CurrentValue;
-
-        // 如果启用默认健康检查，注册中间件
-        if (options.EnableDefaultHealthCheck)
-        {
-            app.UseDefaultHealthCheck();
-        }
-
-        // 如果端口已配置，不需要自动获取
-        if (options.Port != 0)
-        {
-            return app;
-        }
-
-        // 注册一个启动完成后的回调来获取服务器地址
-        var lifetime = app.ApplicationServices.GetService<IHostApplicationLifetime>();
-        if (lifetime != null)
-        {
-            lifetime.ApplicationStarted.Register(() =>
-            {
-                try
-                {
-                    var addressesFeature = server.Features.Get<IServerAddressesFeature>();
-                    var addresses = addressesFeature?.Addresses;
-
-                    if (addresses != null && addresses.Any())
-                    {
-                        var address = addresses.First();
-                        var uri = new Uri(address);
-
-                        // 更新配置值
-                        options.Port = uri.Port;
-
-                        if (string.IsNullOrEmpty(options.Host))
-                        {
-                            options.Host = uri.Host;
-                        }
-
-                        // 记录日志
-                        var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
-                            .CreateLogger("ServiceRegistration");
-                        logger?.LogInformation("自动获取服务地址成功: {Host}:{Port}", options.Host, options.Port);
-                    }
-                    else
-                    {
-                        var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
-                            .CreateLogger("ServiceRegistration");
-                        logger?.LogWarning("无法获取服务器地址，请手动配置端口");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    var logger = app.ApplicationServices.GetService<ILoggerFactory>()?
-                        .CreateLogger("ServiceRegistration");
-                    logger?.LogError(ex, "自动获取服务器地址时发生错误");
-                }
-            });
-        }
-
-        return app;
-    }
 }

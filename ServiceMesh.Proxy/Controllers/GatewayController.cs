@@ -58,7 +58,8 @@ public class GatewayController : ControllerBase
             request.Content = new StreamContent(Request.Body);
             if (Request.ContentType != null)
             {
-                request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(Request.ContentType);
+                // 使用 Parse 方法处理包含 charset 的 Content-Type
+                request.Content.Headers.ContentType = System.Net.Http.Headers.MediaTypeHeaderValue.Parse(Request.ContentType);
             }
         }
 
